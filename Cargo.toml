@@ -13,7 +13,7 @@
 # the Makefile - do not edit it by hand.
 [package]
 name = "ondewo-s2t-client"
-version = "7.5.0"
+version = "7.5.1"
 edition = "2021"
 rust-version = "1.88"
 description = "ONDEWO S2T (Speech-to-Text) gRPC client library, generated from the ondewo-s2t-api protocol buffer definitions"
