@@ -239,6 +239,15 @@ pub struct TranscriptionReturnOptions {
     /// Optional. Whether or not to return timestamps of start and end of the words. Only used in TranscribeFile.
     #[prost(bool, tag="8")]
     pub return_word_timing: bool,
+    /// Optional. Whether the server should send an end-of-speech candidate on a stream (see
+    /// <code>TranscribeStreamResponse.end_of_speech_candidate</code> for what is sent and when). Only used in
+    /// TranscribeStream, and only acted on under server-side turn detection. Fixed per stream, like
+    /// <code>return_start_of_speech</code>: the server completes each request config from the one in effect, so a
+    /// later request without <code>return_options</code> keeps it, but a later <code>return_options</code> block
+    /// replaces every return option at once and must repeat this field, or the candidate stops for the rest of the
+    /// stream. Defaults to false: no candidate is sent, exactly as before this field existed.
+    #[prost(bool, tag="9")]
+    pub return_end_of_speech_candidate: bool,
 }
 /// <p>Configuration of the options to detect utterances</p>
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -246,6 +255,24 @@ pub struct UtteranceDetectionOptions {
     /// if time between audio chunks exceeds next_chunk_timeout, stream will be stopped
     #[prost(float, tag="2")]
     pub next_chunk_timeout: f32,
+    /// Optional. The processing chunk of THIS stream, in samples at the pipeline's sampling rate: the server buffers
+    /// the incoming audio until it holds this many samples and only then runs the voice-activity search, the sliding
+    /// transcription and the turn detector, so it is the cadence at which an utterance can end (8000 samples at
+    /// 16 kHz = 0.5 s; 1600 = 0.1 s). Overrides <code>StreamingSpeechRecognition.min_audio_chunk_size</code> of the
+    /// pipeline config for this stream only. Allowed: 320 - 32000 (20 ms - 2 s at 16 kHz); a smaller chunk costs
+    /// proportionally more voice-activity and transcription requests. Read from the first request of a stream that
+    /// carries it; a later request cannot change a running stream's chunk. Unset: the pipeline's value.
+    #[prost(int64, optional, tag="4")]
+    pub min_audio_chunk_size: ::core::option::Option<i64>,
+    /// Optional. The minimum new audio, in seconds, between two non-final transcriptions of an utterance (the
+    /// partial-transcription cadence; applies only while <code>transcribe_not_final</code> is in force). Overrides
+    /// <code>StreamingSpeechRecognition.transcribe_not_final_period_seconds</code> of the pipeline config and the
+    /// server setting <code>ONDEWO_S2T_INFERENCE_SLIDING_PERIOD_OF_TRANSCRIPT</code> for this request only. Allowed:
+    /// (0, 5]; a shorter period costs proportionally more transcription requests. The server checks the period once
+    /// per processing chunk, so the effective cadence is rounded up to whole <code>min_audio_chunk_size</code>
+    /// chunks. Unset: the pipeline's value, then the server setting.
+    #[prost(float, optional, tag="5")]
+    pub transcribe_not_final_period_seconds: ::core::option::Option<f32>,
     /// Whether or not to transcribe unfinished utterances.
     #[prost(oneof="utterance_detection_options::OneofTranscribeNotFinal", tags="1")]
     pub oneof_transcribe_not_final: ::core::option::Option<utterance_detection_options::OneofTranscribeNotFinal>,
@@ -258,7 +285,10 @@ pub mod utterance_detection_options {
     /// Whether or not to transcribe unfinished utterances.
     #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
     pub enum OneofTranscribeNotFinal {
-        /// Return also immediate transcription results
+        /// Return also immediate transcription results (non-final transcriptions of an utterance while it is
+        /// still being spoken). Unset: the pipeline's <code>StreamingSpeechRecognition.transcribe_not_final</code>,
+        /// then the server default, which is now <code>true</code>; an explicit <code>false</code> opts this
+        /// request out of non-final results.
         #[prost(bool, tag="1")]
         TranscribeNotFinal(bool),
     }
@@ -398,6 +428,20 @@ pub struct TranscribeStreamResponse {
     /// id of the transcribed audio file
     #[prost(string, tag="7")]
     pub audio_uuid: ::prost::alloc::string::String,
+    /// Whether this response is an end-of-speech candidate. Sent only when the request set
+    /// <code>TranscriptionReturnOptions.return_end_of_speech_candidate</code>, only under server-side turn
+    /// detection, and only on the chunk where the server found the end of the caller's speech and its turn detector
+    /// held the utterance open (not finished, an uncertain hold band, or the minimum endpointing delay), so the final
+    /// may follow seconds later. Not sent without turn detection, when the detector judges the turn finished (the
+    /// final is then sent on that same chunk), or while the utterance has no text yet. Never set on a final.
+    /// At most once per pause: if the caller resumes speaking and pauses again, the next pause may send another one.
+    /// With non-final results on, it is a FLAG on the non-final response the server sends for that chunk anyway, so
+    /// it is an ordinary partial plus the hint, not an extra response; with non-final results off, the server sends
+    /// one non-final response carrying the current text in <code>transcriptions</code>. It is a hint, not a commit:
+    /// the utterance's final still follows, or the utterance continues if the caller resumes, and the final text may
+    /// differ. Always false otherwise.
+    #[prost(bool, tag="9")]
+    pub end_of_speech_candidate: bool,
     /// The configuration to override the default configuration
     #[prost(oneof="transcribe_stream_response::OneofConfig", tags="8")]
     pub oneof_config: ::core::option::Option<transcribe_stream_response::OneofConfig>,
@@ -892,9 +936,13 @@ pub struct StreamingServer {
 /// <p>StreamingSpeechRecognition contains information about streaming speech recognition settings.</p>
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StreamingSpeechRecognition {
-    /// Indicates whether to transcribe non-final results.
-    #[prost(bool, tag="1")]
-    pub transcribe_not_final: bool,
+    /// Indicates whether to transcribe non-final results for every stream of this pipeline. Unset: the server
+    /// default, which is now <code>true</code>; an explicit <code>false</code> opts the pipeline out of non-final
+    /// results. A request's <code>UtteranceDetectionOptions.transcribe_not_final</code> overrides it. Declared
+    /// <code>optional</code> (same field number, wire-compatible) so an explicit <code>false</code> can be told
+    /// apart from unset.
+    #[prost(bool, optional, tag="1")]
+    pub transcribe_not_final: ::core::option::Option<bool>,
     /// Decoding method for speech recognition.
     #[prost(string, tag="2")]
     pub decoding_method: ::prost::alloc::string::String,
@@ -910,27 +958,296 @@ pub struct StreamingSpeechRecognition {
     /// Configuration of the options to turn-detection in utterances
     #[prost(message, optional, tag="6")]
     pub turn_detection: ::core::option::Option<TurnDetectionOptions>,
+    /// Optional. The minimum new audio, in seconds, between two non-final transcriptions of an utterance (the
+    /// partial-transcription cadence) for every stream of this pipeline. Overrides the server setting
+    /// <code>ONDEWO_S2T_INFERENCE_SLIDING_PERIOD_OF_TRANSCRIPT</code>; a request's
+    /// <code>UtteranceDetectionOptions.transcribe_not_final_period_seconds</code> overrides it. Allowed: (0, 5]; the
+    /// effective cadence is rounded up to whole <code>min_audio_chunk_size</code> chunks. Unset: the server setting.
+    #[prost(float, optional, tag="7")]
+    pub transcribe_not_final_period_seconds: ::core::option::Option<f32>,
 }
-/// <p>Configuration of the options to turn-detection in utterances</p>
+/// <p>TurnDetectionOptions configures turn detection: deciding, at a pause of the caller, whether the caller has
+/// finished the turn. Exactly one turn detector is chosen by <code>oneof_turn_detector</code>; the fields outside it
+/// apply to every detector.</p>
+/// <p>Precedence for every field: the request config's value
+/// (<code>TranscribeRequestConfig.utterance_detection.turn_detection</code>), then the pipeline config's value
+/// (<code>StreamingSpeechRecognition.turn_detection</code>), then the server's configured value. When the request
+/// config chooses a different detector than the pipeline config, the request config's detector is used with only
+/// its own fields: none of the pipeline config's detector fields carry over.</p>
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TurnDetectionOptions {
     /// Optional. Indicates if the turn-detection feature is active.
     #[prost(bool, optional, tag="1")]
     pub active: ::core::option::Option<bool>,
-    /// Optional. Whether to transcribe the whole utterance when turn moment is detected. It is helpful to increase
-    /// accuracy of transcriptions in cost of drop in speed. If deactivated, it just transcribe from last short silence
-    /// period and concatenates the transcriptions of small audio chunks between tiny silences.
+    /// Optional. Whether to transcribe the whole utterance when the end of a turn is detected. It increases the
+    /// accuracy of the transcription at the cost of speed. If deactivated, only the audio after the last short
+    /// silence is transcribed and the transcriptions of the short audio chunks between silences are concatenated.
     #[prost(bool, optional, tag="2")]
     pub full_utterance_deployment: ::core::option::Option<bool>,
-    /// Optional. System prompt used to guide the turn-detection model.
+    /// Optional. Deprecated in favour of <code>turn_detection_chat_llm_options.system_prompt</code>, but still
+    /// honoured so that configurations written for ondewo-s2t-api 7.5.0 and earlier keep working unchanged. Read
+    /// only when <code>oneof_turn_detector</code> is not set.
+    #[deprecated]
     #[prost(string, optional, tag="3")]
     pub turn_detection_system_prompt: ::core::option::Option<::prost::alloc::string::String>,
-    /// Optional. User prompt used as input to the turn-detection model.
+    /// Optional. Deprecated in favour of <code>turn_detection_chat_llm_options.user_prompt</code>, but still
+    /// honoured. Read only when <code>oneof_turn_detector</code> is not set.
+    #[deprecated]
     #[prost(string, optional, tag="4")]
     pub turn_detection_user_prompt: ::core::option::Option<::prost::alloc::string::String>,
-    /// Optional. Configuration options for the OpenAI client used for turn detection.
+    /// Optional. Deprecated in favour of <code>oneof_turn_detector</code>, but still honoured. Read only when
+    /// <code>oneof_turn_detector</code> is not set; its <code>model</code> then selects the detector by its name, as
+    /// before <code>oneof_turn_detector</code> existed: a name starting with <code>pipecat-smart-turn</code> selects
+    /// pipecat Smart Turn, one starting with <code>ondewo-s2t-model-de-vad-tsd-ondewo-qwen3</code> the ONDEWO German
+    /// turn-detection model, one starting with <code>ondewo-s2t-model-de-fusion-turn-detection</code> the ONDEWO
+    /// German fusion turn detector, and any other name a chat LLM or an end-of-utterance LLM. A name starting with
+    /// <code>pipecat-</code> or <code>ondewo-s2t-model-</code> that matches none of these is refused with
+    /// INVALID_ARGUMENT. On this path every detector-specific value is the server's configured value.
+    #[deprecated]
     #[prost(message, optional, tag="5")]
     pub turn_detection_llm_openai_options: ::core::option::Option<OpenaiLlmOptions>,
+    /// Optional. Seconds of silence after an utterance judged NOT finished before it is finished anyway, valid
+    /// range: 0 - 4. The server raises a value below the voice activity detection's <code>min_duration_off</code>
+    /// to it. Unset = the server's configured value (default: the <code>min_duration_off</code> in use). Applies to
+    /// every "not finished" verdict, whichever detector gave it, including a verdict that did not arrive in time.
+    #[prost(float, optional, tag="6")]
+    pub incomplete_max_silence_seconds: ::core::option::Option<f32>,
+    /// Optional. The latest turns of the conversation before the caller's utterance under evaluation, handed to the
+    /// end-of-utterance LLM as preceding chat turns so that it can judge the utterance against what was said
+    /// before, e.g. a bare number answering a question for a number. Kept outside <code>oneof_turn_detector</code>
+    /// because it is conversation data, not detector configuration: the server keeps it per stream, a request
+    /// whose turn detection carries this field replaces it, an empty wrapper (no turns) clears it, and a request
+    /// without it keeps it. That is why it is a wrapper: the server merges request configs per whole top-level
+    /// field, so a field it did not store itself could not survive a later request that carries turn detection
+    /// without it. The server caps the number of turns and the length of each turn. Unset or empty: the utterance
+    /// is judged alone. Read only by <code>turn_detection_end_of_utterance_llm_options</code>; ignored by every
+    /// other detector. Honoured only in a request config; ignored in a pipeline config, where a per-stream context
+    /// has no meaning.
+    #[prost(message, optional, tag="7")]
+    pub turn_detection_conversation_context: ::core::option::Option<TurnDetectionConversationContext>,
+    /// The turn detector. Not set: the deprecated fields 3 - 5 decide, as before this oneof existed.
+    #[prost(oneof="turn_detection_options::OneofTurnDetector", tags="8, 9, 10, 11, 12")]
+    pub oneof_turn_detector: ::core::option::Option<turn_detection_options::OneofTurnDetector>,
+}
+/// Nested message and enum types in `TurnDetectionOptions`.
+pub mod turn_detection_options {
+    /// The turn detector. Not set: the deprecated fields 3 - 5 decide, as before this oneof existed.
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum OneofTurnDetector {
+        /// A chat LLM asked, with a prompt, whether the caller has finished the turn.
+        #[prost(message, tag="8")]
+        TurnDetectionChatLlmOptions(super::TurnDetectionChatLlmOptions),
+        /// An end-of-utterance LLM (LiveKit-shaped) that scores the probability of the end-of-utterance token.
+        #[prost(message, tag="9")]
+        TurnDetectionEndOfUtteranceLlmOptions(super::TurnDetectionEndOfUtteranceLlmOptions),
+        /// The ONDEWO German turn-detection model: the turn's text and timing, served by vLLM.
+        #[prost(message, tag="10")]
+        TurnDetectionOndewoDeOptions(super::TurnDetectionOndewoDeOptions),
+        /// The ONDEWO German fusion turn detector: the ONDEWO German text model on vLLM plus acoustic heads on
+        /// Triton, combined into one end-of-turn probability.
+        #[prost(message, tag="11")]
+        TurnDetectionOndewoDeFusionOptions(super::TurnDetectionOndewoDeFusionOptions),
+        /// pipecat Smart Turn v3.2: audio only, served by Triton.
+        #[prost(message, tag="12")]
+        TurnDetectionPipecatSmartTurnOptions(super::TurnDetectionPipecatSmartTurnOptions),
+    }
+}
+/// <p>TurnDetectionChatLlmOptions configures a chat LLM as the turn detector: the LLM is asked, with the prompts
+/// below and the transcription of the turn, whether the caller has finished.</p>
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TurnDetectionChatLlmOptions {
+    /// Optional. The OpenAI-compatible endpoint and model of the chat LLM. Unset fields take the server's
+    /// configured values. A <code>model</code> starting with <code>pipecat-</code> or
+    /// <code>ondewo-s2t-model-</code> is refused with INVALID_ARGUMENT: those detectors have their own options.
+    #[prost(message, optional, tag="1")]
+    pub openai_llm_options: ::core::option::Option<OpenaiLlmOptions>,
+    /// Optional. System prompt that guides the LLM. Unset = the server's configured prompt.
+    #[prost(string, optional, tag="2")]
+    pub system_prompt: ::core::option::Option<::prost::alloc::string::String>,
+    /// Optional. User prompt that carries the turn under evaluation. Unset = the server's configured prompt.
+    #[prost(string, optional, tag="3")]
+    pub user_prompt: ::core::option::Option<::prost::alloc::string::String>,
+}
+/// <p>TurnDetectionEndOfUtteranceLlmOptions configures an end-of-utterance LLM (LiveKit-shaped, e.g.
+/// <code>livekit/turn-detector</code>) as the turn detector: the model scores the probability of the
+/// end-of-utterance token after the turn's transcription and, when
+/// <code>TurnDetectionOptions.turn_detection_conversation_context</code> is set, the turns before it.</p>
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TurnDetectionEndOfUtteranceLlmOptions {
+    /// Optional. The OpenAI-compatible endpoint and served model name. Unset fields take the server's configured
+    /// values.
+    #[prost(message, optional, tag="1")]
+    pub openai_llm_options: ::core::option::Option<OpenaiLlmOptions>,
+    /// Optional. The end-of-utterance probability at or above which the caller is taken to have finished the turn,
+    /// valid range: 0 - 1. Unset = the server's configured value (default: the threshold configured for the
+    /// language of the stream).
+    #[prost(float, optional, tag="2")]
+    pub end_of_turn_probability_threshold: ::core::option::Option<f32>,
+    /// Optional. How long a turn judged finished, but only with a probability below a band's upper bound, waits
+    /// for further silence before it is committed. Unset = the server's configured value (default: the bands
+    /// configured for the language of the stream). A wrapper only so that "set with no bands" (a turn at or above
+    /// the threshold is committed at once) means something different from "unset".
+    #[prost(message, optional, tag="3")]
+    pub turn_detection_hold_bands: ::core::option::Option<TurnDetectionHoldBands>,
+    /// Optional. The minimum number of words an utterance needs before a hold band may hold it; a shorter
+    /// utterance judged finished is committed at once. Unset = the server's configured value (default: 3).
+    #[prost(uint32, optional, tag="4")]
+    pub uncertain_min_words: ::core::option::Option<u32>,
+    /// Optional. Whether the exact probability of the end-of-utterance token is computed instead of being read
+    /// from the returned top log probabilities. Unset = the server's configured value (default: false). Requires a
+    /// deployment that returns prompt log probabilities (vLLM <code>prompt_logprobs</code>); on any other
+    /// deployment the probability reads 0, so every turn is judged not finished and waits for
+    /// <code>TurnDetectionOptions.incomplete_max_silence_seconds</code>.
+    #[prost(bool, optional, tag="5")]
+    pub exact_probability: ::core::option::Option<bool>,
+}
+/// <p>TurnDetectionOndewoDeOptions configures the ONDEWO German turn-detection model as the turn detector. It judges
+/// the turn from its text and word timing and is served by vLLM.</p>
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TurnDetectionOndewoDeOptions {
+    /// Optional. The vLLM deployment: <code>base_url</code>, <code>api_key</code> and <code>timeout</code> address
+    /// it, <code>model</code> is the served model name, e.g.
+    /// <code>ondewo-s2t-model-de-vad-tsd-ondewo-qwen3-0.6b</code>. Unset fields take the server's configured values.
+    #[prost(message, optional, tag="1")]
+    pub openai_llm_options: ::core::option::Option<OpenaiLlmOptions>,
+    /// Optional. The end-of-turn probability the model must reach for the caller to be taken to have finished the
+    /// turn, valid range: 0 - 1. A turn below it is judged not finished and waits for
+    /// <code>TurnDetectionOptions.incomplete_max_silence_seconds</code>. Unset = the server's configured value
+    /// (default: 0.5). Precedence: the request config's value, then the pipeline config's value, then the server's
+    /// configured value.
+    #[prost(float, optional, tag="2")]
+    pub end_of_turn_probability_threshold: ::core::option::Option<f32>,
+}
+/// <p>TurnDetectionOndewoDeFusionOptions configures the ONDEWO German fusion turn detector. It combines the ONDEWO
+/// German text model on vLLM, acoustic heads on Triton and signals computed from the stream into one end-of-turn
+/// probability. The Triton heads, the text model's served name and the weights file are server settings.</p>
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TurnDetectionOndewoDeFusionOptions {
+    /// Optional. Addresses the vLLM deployment of the text model (<code>base_url</code>, <code>api_key</code>,
+    /// <code>timeout</code>); <code>model</code> names the fusion variant, e.g.
+    /// <code>ondewo-s2t-model-de-fusion-turn-detection</code>. Unset fields take the server's configured values.
+    #[prost(message, optional, tag="1")]
+    pub openai_llm_options: ::core::option::Option<OpenaiLlmOptions>,
+    /// Optional. The end-of-turn probability at or above which the caller is taken to have finished the turn,
+    /// valid range: 0 - 1. Unset = the server's configured value, else the weights file's threshold.
+    #[prost(float, optional, tag="2")]
+    pub end_of_turn_probability_threshold: ::core::option::Option<f32>,
+}
+/// <p>TurnDetectionPipecatSmartTurnOptions configures pipecat Smart Turn v3.2 as the turn detector. It judges the
+/// turn from the caller's audio alone and is served by Triton.</p>
+/// <p>Model: <a href="<https://github.com/pipecat-ai/smart-turn">pipecat> Smart Turn</a></p>
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TurnDetectionPipecatSmartTurnOptions {
+    /// Optional. Full name of the Triton model. Unset = the server's configured value (default:
+    /// <code>ondewo-s2t-model-multi-turn-detection-pipecat-smart-turn-3.2-onnx-triton</code>).
+    #[prost(string, optional, tag="1")]
+    pub model_name: ::core::option::Option<::prost::alloc::string::String>,
+    /// Optional. Host name of the Triton inference server that serves the model, as
+    /// <code>Pyannote.triton_server_host</code>. Unset = the server's configured value. The connection uses the
+    /// server's Triton client TLS settings.
+    #[prost(string, optional, tag="2")]
+    pub triton_server_host: ::core::option::Option<::prost::alloc::string::String>,
+    /// Optional. Port of the Triton inference server that serves the model, as
+    /// <code>Pyannote.triton_server_port</code>. Unset = the server's configured value.
+    #[prost(int64, optional, tag="3")]
+    pub triton_server_port: ::core::option::Option<i64>,
+    /// Optional. Seconds of the caller's audio, ending at the decision moment, that the model hears; valid range:
+    /// 1 - 8. Shorter audio is left-padded with silence to 8 s, as the model was trained. Unset = the server's
+    /// configured value (default: 8).
+    #[prost(float, optional, tag="4")]
+    pub max_audio_seconds: ::core::option::Option<f32>,
+    /// Optional. Seconds to wait for Triton's answer, valid range: greater than 0, at most 5. A turn whose verdict
+    /// does not arrive in time is judged not finished and waits for
+    /// <code>TurnDetectionOptions.incomplete_max_silence_seconds</code>. Unset = the server's configured value
+    /// (default: 0.2).
+    #[prost(float, optional, tag="5")]
+    pub timeout_seconds: ::core::option::Option<f32>,
+    /// Optional. The end-of-turn probability Smart Turn must report for the caller to be taken to have finished the
+    /// turn, valid range: 0 - 1. A turn below it is judged not finished and waits for
+    /// <code>TurnDetectionOptions.incomplete_max_silence_seconds</code>. Unset = the server's configured value
+    /// (default: 0.5). Precedence: the request config's value, then the pipeline config's value, then the server's
+    /// configured value.
+    #[prost(float, optional, tag="6")]
+    pub end_of_turn_probability_threshold: ::core::option::Option<f32>,
+}
+/// <p>TurnDetectionConversationContext carries the latest turns of the conversation for
+/// <code>TurnDetectionEndOfUtteranceLlmOptions</code> (see
+/// <code>TurnDetectionOptions.turn_detection_conversation_context</code>). No other detector reads it.</p>
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TurnDetectionConversationContext {
+    /// The turns of the conversation, oldest first. They EXCLUDE the caller's utterance under evaluation, which
+    /// the server appends itself.
+    #[prost(message, repeated, tag="1")]
+    pub turn_detection_context_turns: ::prost::alloc::vec::Vec<TurnDetectionContextTurn>,
+}
+/// <p>One turn of the conversation context of the turn detection, read only by
+/// <code>TurnDetectionEndOfUtteranceLlmOptions</code>.</p>
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TurnDetectionContextTurn {
+    /// Who spoke the turn.
+    #[prost(enumeration="turn_detection_context_turn::Role", tag="1")]
+    pub role: i32,
+    /// The text of the turn.
+    #[prost(string, tag="2")]
+    pub text: ::prost::alloc::string::String,
+}
+/// Nested message and enum types in `TurnDetectionContextTurn`.
+pub mod turn_detection_context_turn {
+    /// <p>Who spoke the turn.</p>
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+    #[repr(i32)]
+    pub enum Role {
+        /// Unspecified role. The server ignores a turn without a role.
+        Unspecified = 0,
+        /// The caller, i.e. the speaker whose turns are detected.
+        User = 1,
+        /// The voice assistant. Its text is what the caller HEARD, i.e. the spoken prefix of an interrupted
+        /// utterance.
+        Assistant = 2,
+    }
+    impl Role {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                Self::Unspecified => "ROLE_UNSPECIFIED",
+                Self::User => "ROLE_USER",
+                Self::Assistant => "ROLE_ASSISTANT",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "ROLE_UNSPECIFIED" => Some(Self::Unspecified),
+                "ROLE_USER" => Some(Self::User),
+                "ROLE_ASSISTANT" => Some(Self::Assistant),
+                _ => None,
+            }
+        }
+    }
+}
+/// <p>TurnDetectionHoldBands carries the hold bands of <code>TurnDetectionEndOfUtteranceLlmOptions</code>. No other
+/// detector reads them.</p>
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TurnDetectionHoldBands {
+    /// The bands, each holding a turn judged finished with a probability below its upper bound: the first band,
+    /// sorted by <code>upper_probability</code>, whose upper probability exceeds the end-of-utterance probability
+    /// decides the hold. A probability above every band is finished at once.
+    #[prost(message, repeated, tag="1")]
+    pub turn_detection_hold_bands: ::prost::alloc::vec::Vec<TurnDetectionHoldBand>,
+}
+/// <p>One hold band of <code>TurnDetectionEndOfUtteranceLlmOptions</code>.</p>
+#[derive(Clone, Copy, PartialEq, ::prost::Message)]
+pub struct TurnDetectionHoldBand {
+    /// The exclusive upper bound of the end-of-utterance probabilities this band covers, valid range: 0 - 1.
+    #[prost(float, tag="1")]
+    pub upper_probability: f32,
+    /// Seconds of silence a turn in this band waits before it is committed, valid range: 0 - 4. The server never
+    /// holds longer than <code>TurnDetectionOptions.incomplete_max_silence_seconds</code>.
+    #[prost(float, tag="2")]
+    pub max_silence_seconds: f32,
 }
 /// <p>Configuration options for OpenAI client chat completion requests used in turn detection and LLM post-processing.</p>
 #[derive(Clone, PartialEq, ::prost::Message)]

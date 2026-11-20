@@ -2,6 +2,15 @@
 
 *****************
 
+## Release ONDEWO S2T Rust Client 7.6.0
+
+### Improvements
+
+* Tracking API Version [7.6.0](https://github.com/ondewo/ondewo-s2t-api/releases/tag/7.6.0) ( [Documentation](https://ondewo.github.io/ondewo-s2t-api/) )
+* Generated with ondewo-proto-compiler 5.17.0 (protoc 35.1). New runtime floors: `prost` / `prost-types` 0.14.6 and `tonic` / `tonic-prost` 0.14.9.
+
+*****************
+
 ## Release ONDEWO S2T Rust Client 7.5.1
 
 ### New Features
